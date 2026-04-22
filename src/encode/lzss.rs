@@ -64,14 +64,14 @@ impl LzssSettings {
         }
     }
 
-    const fn window_size(&self) -> usize {
+    pub(super) const fn window_size(&self) -> usize {
         // overflow assert?
         (1 << self.offset_bits) - 1
     }
     /// maximum number of bytes that can be encoded
     /// note that Nintendo's VPK encoder uses the extra `max_uncoded` bits for
     /// encoding a TwoSample vpk file, so you cannot use them here to encode longer matches
-    const fn max_encoded(&self) -> usize {
+    pub(super) const fn max_encoded(&self) -> usize {
         // overflow assert?
         (1 << self.length_bits) - 1
     }
@@ -98,6 +98,12 @@ pub(super) struct LzssPass {
 }
 
 impl LzssPass {
+    pub(super) fn new_with_size(input_size: usize, settings: &LzssSettings) -> Self {
+        let mut pass = Self::new(input_size, settings);
+        pass.decompressed_size = Some(input_size as u32);
+        pass
+    }
+
     fn new(input_size: usize, settings: &LzssSettings) -> Self {
         let buf = Vec::with_capacity(input_size);
         let max_size_bits = count_needed_bits(settings.max_encoded()) as usize;
@@ -113,11 +119,11 @@ impl LzssPass {
         }
     }
 
-    fn add_uncoded(&mut self, byte: u8) {
+    pub(super) fn add_uncoded(&mut self, byte: u8) {
         self.buf.push(LzssByte::Uncoded(byte))
     }
 
-    fn add(&mut self, byte: LzssByte) {
+    pub(super) fn add(&mut self, byte: LzssByte) {
         // count new length/size and offset/moveback bitwidths
         match byte {
             LzssByte::Encoded(size, offset) => {
@@ -195,6 +201,7 @@ pub(super) fn compress_rdr<R: Read>(
         LzssBackend::Brute => &NaiveBrute as &dyn MatchFinder,
         LzssBackend::Kmp => &KmpStandard as &dyn MatchFinder,
         LzssBackend::KmpAhead => &KmpLookAhead as &dyn MatchFinder,
+        LzssBackend::Snap => unreachable!("Snap backend handled in do_snap_encode"),
     };
 
     while dict.remaining() > 0 {

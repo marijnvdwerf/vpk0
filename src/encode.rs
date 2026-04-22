@@ -12,6 +12,8 @@ use std::{
 
 mod huffman;
 pub(crate) mod lzss;
+mod snap;
+mod snap_tree;
 
 use self::{
     huffman::{EncodedMaps, MapTree},
@@ -31,6 +33,10 @@ pub enum LzssBackend {
     Kmp,
     /// Nintendo matching search with a modified, slower Knuth–Morris–Pratt algorithm
     KmpAhead,
+    /// Lazy-match hash-chain search matching the original Pokemon Snap encoder.
+    /// Uses a different tree derivation algorithm (top-down greedy splitter)
+    /// that also produces byte-identical output.
+    Snap,
 }
 
 /// Specify the encoding settings, such as window size, logging, input, and output
@@ -257,16 +263,95 @@ fn do_encode<R: Read, W: Write>(opts: &mut Encoder<'_, R>, mut wtr: W) -> Result
         backend,
     } = opts;
 
+    if *backend == LzssBackend::Snap {
+        return do_snap_encode(rdr, *method, *settings, &mut wtr);
+    }
+
     let lzss = lzss::compress_rdr(rdr, *settings, *method, *backend, log)?;
     let huff_maps = huffman::EncodedMaps::new(*offsets, *lengths, &lzss)?;
 
     if let Some(wtr) = log.as_mut() {
         writeln!(wtr, "Huff Offsets / Movebacks\n{}", huff_maps.offsets)?;
         writeln!(wtr, "Huff Lengths / Size\n{}", huff_maps.lengths)?;
-        //writeln!(info_wtr, "{}", &lzss)?;
     }
 
     write_file(&mut wtr, *method, &lzss, &huff_maps)
+}
+
+fn do_snap_encode<R: Read, W: Write>(
+    rdr: &mut R,
+    method: VpkMethod,
+    settings: LzssSettings,
+    wtr: &mut W,
+) -> Result<(), VpkError> {
+    let mut data = Vec::new();
+    rdr.read_to_end(&mut data)?;
+
+    let lzss = snap::compress(&data, settings, method);
+    let (off_tree, len_tree) = snap_tree::build_trees(&lzss);
+
+    let mut out = BitWriter::endian(wtr, BigEndian);
+    let header = VpkHeader {
+        size: lzss.decompressed_size.unwrap(),
+        method,
+    };
+
+    header.write(&mut out)?;
+    off_tree.tree.write(&mut out)?;
+    len_tree.tree.write(&mut out)?;
+
+    for code in &lzss.buf {
+        match *code {
+            LzssByte::Uncoded(byte) => {
+                out.write_bit(LzssSettings::UNCODED)?;
+                out.write(8, byte)?;
+            }
+            LzssByte::Encoded(length, offset) => {
+                out.write_bit(LzssSettings::ENCODED)?;
+                write_snap_val(&mut out, offset, &off_tree.map)?;
+                write_snap_val(&mut out, length, &len_tree.map)?;
+            }
+            LzssByte::EncTwoSample(length, sample) => {
+                out.write_bit(LzssSettings::ENCODED)?;
+
+                match sample {
+                    TwoSample::One(offset) => {
+                        write_snap_val(&mut out, offset, &off_tree.map)?;
+                    }
+                    TwoSample::Two { first, second } => {
+                        write_snap_val(&mut out, first, &off_tree.map)?;
+                        write_snap_val(&mut out, second, &off_tree.map)?;
+                    }
+                }
+                write_snap_val(&mut out, length, &len_tree.map)?;
+            }
+        }
+    }
+
+    out.byte_align()?;
+    Ok(())
+}
+
+fn write_snap_val<W: Write>(
+    out: &mut BitWriter<W, BigEndian>,
+    val: usize,
+    code_map: &snap_tree::CodeMap,
+) -> Result<(), VpkError> {
+    let bits_needed = count_needed_bits(val);
+    // Find the smallest bucket that can hold this value.
+    let mut best_bits: Option<u8> = None;
+    for &bucket_bits in code_map.keys() {
+        if val < (1usize << bucket_bits) {
+            if best_bits.is_none() || bucket_bits < best_bits.unwrap() {
+                best_bits = Some(bucket_bits);
+            }
+        }
+    }
+    let bucket_bits = best_bits.unwrap_or(bits_needed);
+    let (_, ref huff_code) = code_map[&bucket_bits];
+    out.write(huff_code.bitlen(), huff_code.code)?;
+    out.write(bucket_bits as u32, val as u32)?;
+    Ok(())
 }
 
 fn write_file(

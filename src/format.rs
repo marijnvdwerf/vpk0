@@ -190,6 +190,18 @@ impl VpkTree {
             entries: Vec::new(),
         }
     }
+
+    pub(crate) fn from_entries(entries: Vec<TreeEntry>) -> Self {
+        Self { entries }
+    }
+
+    pub(crate) fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    pub(crate) fn entry(&self, idx: usize) -> TreeEntry {
+        self.entries[idx]
+    }
     pub(crate) fn from_bitreader<R: Read>(bits: &mut BitReader<R, BE>) -> Result<Self, VpkError> {
         let mut entries: Vec<TreeEntry> = Vec::new();
         let mut buf: Vec<usize> = Vec::new();

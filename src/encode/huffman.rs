@@ -401,6 +401,10 @@ impl HuffCode {
     fn new() -> Self {
         Self { code: 0, size: 0 }
     }
+
+    pub(super) fn create(code: u32, len: u8) -> Self {
+        Self { code, size: len }
+    }
 }
 
 impl fmt::Display for HuffCode {
